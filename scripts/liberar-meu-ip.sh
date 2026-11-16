@@ -10,6 +10,12 @@
 #       bash scripts/liberar-meu-ip.sh --fechar     # tranca de novo
 # =====================================================================
 set -euo pipefail
+# Git Bash (Windows) converte argumentos que começam com "/" em caminho do
+# Windows antes de chamar o aws.exe: /oficina/hom/... vira C:/Program
+# Files/Git/oficina/hom/... e o SSM responde ParameterNotFound. Só os nomes
+# do SSM ficam de fora da conversão — caminhos de arquivo (/c/Users/...)
+# continuam sendo convertidos. Sem efeito no Linux.
+export MSYS2_ARG_CONV_EXCL="/oficina"
 
 NS=oficina
 SERVICOS="oficina-os-publico oficina-execucao-publico oficina-billing-publico"

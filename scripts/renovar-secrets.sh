@@ -20,6 +20,12 @@
 #   2. bash scripts/renovar-secrets.sh SEU-USUARIO-GITHUB
 # =====================================================================
 set -euo pipefail
+# Git Bash (Windows) converte argumentos que começam com "/" em caminho do
+# Windows antes de chamar o aws.exe: /oficina/hom/... vira C:/Program
+# Files/Git/oficina/hom/... e o SSM responde ParameterNotFound. Só os nomes
+# do SSM ficam de fora da conversão — caminhos de arquivo (/c/Users/...)
+# continuam sendo convertidos. Sem efeito no Linux.
+export MSYS2_ARG_CONV_EXCL="/oficina"
 
 USUARIO="${1:-}"
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -18,6 +18,12 @@
 # Uso:  bash scripts/diagnostico-lab.sh
 # =====================================================================
 set -uo pipefail
+# Git Bash (Windows) converte argumentos que começam com "/" em caminho do
+# Windows antes de chamar o aws.exe: /oficina/hom/... vira C:/Program
+# Files/Git/oficina/hom/... e o SSM responde ParameterNotFound. Só os nomes
+# do SSM ficam de fora da conversão — caminhos de arquivo (/c/Users/...)
+# continuam sendo convertidos. Sem efeito no Linux.
+export MSYS2_ARG_CONV_EXCL="/oficina"
 
 VERDE=$'\033[0;32m'; VERMELHO=$'\033[0;31m'; AMARELO=$'\033[0;33m'; NEGRITO=$'\033[1m'; FIM=$'\033[0m'
 ok()    { echo "  ${VERDE}[ OK ]${FIM} $*"; }
