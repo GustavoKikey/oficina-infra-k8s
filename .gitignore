@@ -4,3 +4,6 @@
 *.tfvars
 !exemplo.tfvars
 crash.log
+
+# Gerado por scripts/bootstrap.sh (nomes do bucket e da tabela do state)
+scripts/.backend.env

@@ -1,0 +1,25 @@
+# Endereço do RabbitMQ para os serviços: rabbitmq.oficina.svc.cluster.local
+# (o mesmo publicado no SSM em /oficina/{env}/mensageria/host).
+# Só dentro do cluster: o painel se abre por port-forward, nunca por LB.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: oficina
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: oficina
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp
+    - name: management
+      port: 15672
+      targetPort: management
+    - name: prometheus
+      port: 15692
+      targetPort: prometheus

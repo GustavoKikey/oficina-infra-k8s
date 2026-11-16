@@ -1,0 +1,106 @@
+# RabbitMQ do cluster — uma réplica (ADR 008 do OS Service).
+#
+# Armazenamento: emptyDir, não volume persistente. No EKS um PVC exige o
+# driver EBS CSI com permissão de IAM que a role dos nós do Learner Lab não
+# garante, e o ambiente do lab é recriado a cada sessão. O que se perde num
+# reinício do broker são mensagens ainda na fila; o lado de quem publica
+# está protegido pelo outbox (ADR 010), e a saga reenvia comandos sem
+# resposta (saga.md §6). Em produção: cluster de 3 nós com volume EBS, ou
+# Amazon MQ.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: oficina
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: mensageria
+    app.kubernetes.io/part-of: oficina
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rabbitmq
+        app.kubernetes.io/component: mensageria
+        app.kubernetes.io/part-of: oficina
+      annotations:
+        # Métricas do broker (filas, mensagens prontas, DLQ) para o New Relic.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+        newrelic.io/scrape: "true"
+        newrelic.io/port: "15692"
+    spec:
+      terminationGracePeriodSeconds: 30
+      # Sem runAsUser: a imagem oficial começa como root só para ajustar o
+      # dono do diretório de dados e troca para o usuário rabbitmq sozinha
+      # (o UID dele muda entre as variantes da imagem).
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.3-management-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+            - name: prometheus
+              containerPort: 15692
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oficina-rabbitmq-admin
+                  key: username
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: oficina-rabbitmq-admin
+                  key: password
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rabbitmq/conf.d/20-oficina.conf
+              subPath: rabbitmq.conf
+            - name: config
+              mountPath: /etc/rabbitmq/enabled_plugins
+              subPath: enabled_plugins
+            - name: dados
+              mountPath: /var/lib/rabbitmq
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "ping"]
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 36
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            periodSeconds: 15
+            timeoutSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "status"]
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: rabbitmq-config
+        - name: dados
+          emptyDir:
+            sizeLimit: 1Gi

@@ -36,9 +36,13 @@ variable "tipo_instancia_no" {
 }
 
 variable "nos_desejados" {
-  description = "Quantidade de nós no node group."
+  description = <<-EOT
+    Quantidade de nós no node group. Na fase 4 são 3: três serviços Java
+    (512 MiB cada, com réplica extra no rollout), o RabbitMQ e o agente do
+    New Relic não cabem com folga em dois t3.medium.
+  EOT
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "role_arn_cluster" {

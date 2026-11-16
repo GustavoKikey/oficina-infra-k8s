@@ -1,0 +1,27 @@
+# RabbitMQ do cluster — configuração do broker (ADR 008 do OS Service).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: oficina
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: oficina
+data:
+  rabbitmq.conf: |
+    # O usuário admin (RABBITMQ_DEFAULT_USER) só é usado pelo Job que cria os
+    # usuários dos serviços e por quem abre o painel via port-forward.
+    loopback_users = none
+    # Os serviços declaram as próprias filas como quorum; isto vale para o
+    # que for declarado sem tipo.
+    default_queue_type = quorum
+    # Memória do container: o broker bloqueia publicações antes do OOMKill.
+    vm_memory_high_watermark.relative = 0.6
+    disk_free_limit.absolute = 256MB
+    management.tcp.port = 15672
+    # Métricas por fila no endpoint Prometheus (o padrão é só o agregado):
+    # o painel e o alerta da DLQ precisam saber QUAL fila tem mensagem.
+    # Com poucas filas, o custo de cardinalidade é desprezível.
+    prometheus.return_per_object_metrics = true
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_prometheus].
