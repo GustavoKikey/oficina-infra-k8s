@@ -21,9 +21,16 @@ variable "projeto" {
 }
 
 variable "versao_kubernetes" {
-  description = "Versão do control plane do EKS."
+  description = <<-EOT
+    Versão do control plane do EKS. Conferir antes de subir um ambiente:
+      aws eks describe-cluster-versions
+    Versão fora do suporte padrão (EXTENDED_SUPPORT) custa ~6x mais por hora
+    de control plane, e some do catálogo quando o suporte estendido acaba.
+    A 1.31 da fase 3 estava nessa situação em 2026-11; a 1.37 é a padrão da
+    AWS, com suporte padrão até 2027-11.
+  EOT
   type        = string
-  default     = "1.31"
+  default     = "1.37"
 }
 
 variable "tipo_instancia_no" {
