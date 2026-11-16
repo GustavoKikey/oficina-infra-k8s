@@ -10,6 +10,10 @@ microsserviços usam — e os **scripts de operação** do ambiente inteiro. Nas
                                                       Billing
 ```
 
+> **Validado em 2026-11-16:** o ambiente `hom` subiu inteiro com `scripts/aplicar.sh hom` e o
+> fluxo completo de uma OS rodou no EKS, com pagamento real no Mercado Pago. Checklist da
+> entrega da fase 4: [README do OS Service](https://github.com/GustavoKikey/oficina-os-service#entrega-da-fase-4--onde-está-cada-requisito).
+
 Arquitetura do sistema e decisões de implantação:
 [oficina-os-service/docs/fase-4](https://github.com/GustavoKikey/oficina-os-service/tree/main/docs/fase-4)
 (em especial o [ADR 012](https://github.com/GustavoKikey/oficina-os-service/blob/main/docs/fase-4/adr/adr-012-implantacao-na-aws.md)).
@@ -21,7 +25,7 @@ Arquitetura do sistema e decisões de implantação:
 | Security group do cluster | Saída liberada (pull de imagem, OTLP, Mercado Pago, DynamoDB) |
 | Security group dos bancos | Só aceita 5432 dos nós do cluster; sem saída. Usado pelos dois RDS (OS e Execução) |
 | Security group da Lambda | **Sem internet**: só a porta 80 dentro da VPC, para o LB interno do OS Service |
-| Cluster EKS + node group | `t3.medium`, **3 nós** (teto de 5 para o HPA); logs de `api` e `audit` no CloudWatch |
+| Cluster EKS + node group | **Kubernetes 1.37** (a versão padrão da AWS em 2026-11; a 1.31 da fase 3 já estava em suporte estendido, ~6× mais caro); `t3.medium`, **3 nós** (teto de 5 para o HPA); logs de `api` e `audit` no CloudWatch |
 | Addon metrics-server | Pré-requisito do HPA |
 | Credenciais do RabbitMQ | Admin + **um usuário por serviço**, geradas pelo Terraform, no Secrets Manager |
 | RabbitMQ no cluster ([`k8s/rabbitmq/`](k8s/rabbitmq/)) | StatefulSet de uma réplica, filas quorum, métricas Prometheus por fila, Job que cria os usuários |
@@ -59,7 +63,8 @@ liga o lab -> diagnostico -> (bootstrap, 1x) -> renovar-secrets -> aplicar -> us
 | [`plataforma-k8s.sh hom`](scripts/plataforma-k8s.sh) | Chamado pelo `aplicar.sh` e pelo workflow | Namespace, Secrets do RabbitMQ, o broker e os usuários |
 | [`destruir.sh hom`](scripts/destruir.sh) | **Antes de fechar o lab** | Ordem inversa; apaga antes os load balancers do Kubernetes, que senão travariam a rede |
 
-Os scripts esperam os repositórios clonados lado a lado:
+Os scripts funcionam no Linux e no Git Bash do Windows, e esperam os repositórios clonados
+lado a lado:
 
 ```
 pasta/
