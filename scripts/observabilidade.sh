@@ -17,6 +17,10 @@
 #   bash scripts/observabilidade.sh hom
 # =====================================================================
 set -euo pipefail
+# Git Bash (Windows) converte argumentos que começam com "/" em caminho do
+# Windows antes de chamar o aws.exe: /oficina/hom/... vira C:/Program
+# Files/Git/oficina/hom/... e o SSM responde ParameterNotFound. Sem efeito no Linux.
+export MSYS_NO_PATHCONV=1
 
 AMBIENTE="${1:-hom}"
 REGIAO="${AWS_REGION:-us-east-1}"
