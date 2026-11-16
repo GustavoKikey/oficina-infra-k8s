@@ -185,5 +185,5 @@ else
   echo "  ${AMARELO}${PROBLEMAS} verificação(ões) falharam${FIM} — reveja acima antes de aplicar."
 fi
 echo
-echo "  Lembrete: a sessão do lab dura 4h. Rode 99-destruir.sh antes de sair."
+echo "  Lembrete: a sessão do lab dura 4h. Rode scripts/destruir.sh antes de sair."
 echo
