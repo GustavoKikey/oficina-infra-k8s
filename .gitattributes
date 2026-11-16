@@ -1,0 +1,5 @@
+# Quebras de linha normalizadas no repositório; scripts sempre com LF
+# (com CRLF, o Git Bash do Windows quebra com "command not found" no \r).
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
