@@ -24,6 +24,15 @@ resource "aws_ssm_parameter" "vpc_id" {
   tags        = local.tags
 }
 
+resource "aws_ssm_parameter" "vpc_cidr" {
+  name        = "${local.prefixo_ssm}/rede/vpc-cidr"
+  description = "CIDR da VPC - origem aceita pelos load balancers internos"
+  type        = "String"
+  value       = data.aws_vpc.default.cidr_block
+  overwrite   = true
+  tags        = local.tags
+}
+
 resource "aws_ssm_parameter" "subnet_ids" {
   name        = "${local.prefixo_ssm}/rede/subnet-ids"
   description = "Subnets para RDS subnet group e para a Lambda na VPC"

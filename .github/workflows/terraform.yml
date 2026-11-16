@@ -1,42 +1,48 @@
 # =====================================================================
-# CI/CD — Infraestrutura Kubernetes (repo 2)
+# Infraestrutura da plataforma — rede, cluster EKS e RabbitMQ
 # ---------------------------------------------------------------------
-# PR   -> fmt, validate, tflint e plan (comentado no PR). Nunca aplica.
-# push em homolog -> apply no ambiente 'hom'
-# push em main    -> apply no ambiente 'prod'
+# PR e push  -> fmt, validate, tflint e kubeconform. Não toca na nuvem.
+# PR         -> plan comentado no PR, se a sessão do lab estiver ativa.
+# Run workflow (manual) -> terraform apply + plataforma no cluster
+#                          (scripts/plataforma-k8s.sh), no ambiente escolhido.
 #
-# A branch main é protegida: só entra por Pull Request aprovado.
+# Fase 4: o apply deixou de ser automático no merge. Com três serviços e
+# credenciais do Learner Lab que vencem em 4 horas, um apply por merge
+# gastaria crédito à toa e pintaria a pipeline de vermelho sempre que a
+# sessão estivesse fechada. A infraestrutura sobe quando alguém vai usá-la
+# (aqui ou em scripts/aplicar.sh); o DEPLOY dos serviços é que é contínuo.
 # =====================================================================
 name: Terraform
 
 on:
   pull_request:
-    branches: [main, homolog]
+    branches: [main]
   push:
-    branches: [main, homolog]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      ambiente:
+        description: Ambiente a provisionar
+        type: choice
+        options: [hom, prod]
+        default: hom
 
-# Um apply por vez. Sem isso, dois merges próximos disputariam o lock do
-# DynamoDB e um deles falharia no meio.
 concurrency:
   group: terraform-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
 
 env:
   TF_VERSION: "1.9.8"
   AWS_REGION: us-east-1
 
 jobs:
-  # ===================================================================
-  # Validação — roda em PR e em push, sem tocar na nuvem
-  # ===================================================================
   validar:
     name: Formato, sintaxe e lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -47,8 +53,7 @@ jobs:
       - name: Formatação
         run: terraform fmt -check -recursive -diff
 
-      # -backend=false: valida sintaxe e tipos sem precisar de credencial
-      # nem do bucket de state. É o que permite validar em fork/PR externo.
+      # -backend=false: valida sintaxe e tipos sem credencial nem bucket de state.
       - name: Inicialização sem backend
         run: terraform init -backend=false -input=false
 
@@ -59,15 +64,29 @@ jobs:
         uses: terraform-linters/setup-tflint@v4
       - run: tflint --recursive
 
-  # ===================================================================
-  # Plan — só em PR, comentado no próprio PR
-  # ===================================================================
+      - name: kubeconform (k8s/rabbitmq contra o schema oficial)
+        run: |
+          docker run --rm -v "$PWD/k8s:/k8s:ro" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary /k8s
+
+      - name: Sintaxe dos scripts
+        run: for s in scripts/*.sh; do bash -n "$s" && echo "ok  $s"; done
+
+  # Checagem obrigatória da main. Com o lab desligado (credenciais vencidas)
+  # o plan é pulado com aviso: travar o PR por isso não protege nada.
   plan:
     name: Plan (${{ github.base_ref == 'main' && 'prod' || 'hom' }})
     needs: validar
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     environment: ${{ github.base_ref == 'main' && 'prod' || 'hom' }}
+    env:
+      AMBIENTE: ${{ github.base_ref == 'main' && 'prod' || 'hom' }}
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,11 +94,9 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # Credenciais do AWS Academy são TEMPORÁRIAS (sessão de 4h): o
-      # AWS_SESSION_TOKEN precisa ser renovado nos secrets a cada sessão.
-      # Numa conta própria, trocar por OIDC (role-to-assume) e remover
-      # as três chaves. Ver RFC 001, §5.
       - name: Credenciais AWS
+        id: aws
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -87,61 +104,80 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: A sessão do lab está ativa?
+        id: sessao
+        env:
+          RESULTADO_CREDENCIAIS: ${{ steps.aws.outcome }}
+        run: |
+          if [ "$RESULTADO_CREDENCIAIS" = success ] && aws sts get-caller-identity >/dev/null 2>&1; then
+            echo "ativa=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ativa=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Credenciais AWS vencidas (sessão do Learner Lab fechada) — plan pulado."
+            echo "## Plan pulado — credenciais AWS vencidas" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Init
+        if: steps.sessao.outputs.ativa == 'true'
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
-            -backend-config="key=infra-k8s/${{ github.base_ref == 'main' && 'prod' || 'hom' }}/terraform.tfstate"
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
+            -backend-config="key=infra-k8s/${AMBIENTE}/terraform.tfstate"
 
       - name: Plan
         id: plan
-        run: |
-          terraform plan -input=false -no-color \
-            -var="ambiente=${{ github.base_ref == 'main' && 'prod' || 'hom' }}" \
-            -out=tfplan 2>&1 | tee plan.txt
+        if: steps.sessao.outputs.ativa == 'true'
         continue-on-error: true
+        run: |
+          terraform plan -input=false -no-color -var="ambiente=${AMBIENTE}" 2>&1 | tee plan.txt
+          exit "${PIPESTATUS[0]}"
 
       - name: Comentar o plan no PR
+        if: steps.sessao.outputs.ativa == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             let plan = fs.readFileSync('plan.txt', 'utf8');
-            // Comentário do GitHub tem limite de 65536 caracteres.
-            const LIMITE = 60000;
-            if (plan.length > LIMITE) {
-              plan = plan.slice(0, LIMITE) + '\n\n... (truncado — ver log completo na aba Actions)';
-            }
+            const LIMITE = 60000; // comentário do GitHub aceita até 65536 caracteres
+            if (plan.length > LIMITE) plan = plan.slice(0, LIMITE) + '\n\n... (truncado — ver a aba Actions)';
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `### Terraform plan — \`infra-k8s\`\n\n<details><summary>Ver plano</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`
+              body: `### Terraform plan — \`infra-k8s\` (${process.env.AMBIENTE})\n\n<details><summary>Ver plano</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`
             });
 
       - name: Falhar se o plan falhou
         if: steps.plan.outcome == 'failure'
         run: exit 1
 
-  # ===================================================================
-  # Apply — só em push nas branches de ambiente
-  # ===================================================================
-  apply:
-    name: Apply (${{ github.ref_name == 'main' && 'prod' || 'hom' }})
+  aplicar:
+    name: Apply + plataforma (${{ inputs.ambiente }})
     needs: validar
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # O Environment do GitHub guarda os secrets por ambiente e permite
-    # exigir aprovação manual antes do apply em prod.
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'hom' }}
+    permissions:
+      contents: read
+    environment: ${{ inputs.ambiente }}
+    # Inputs e secrets entram nos scripts por variável de ambiente, nunca
+    # por ${{ }} dentro de run: (evita injeção de script).
+    env:
+      AMBIENTE: ${{ inputs.ambiente }}
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # O wrapper do setup-terraform polui o stdout de "terraform output".
+          terraform_wrapper: false
 
+      # Credenciais do AWS Academy são TEMPORÁRIAS (sessão de 4h):
+      # scripts/renovar-secrets.sh as reenvia a cada sessão.
       - name: Credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -153,22 +189,25 @@ jobs:
       - name: Init
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
-            -backend-config="key=infra-k8s/${{ github.ref_name == 'main' && 'prod' || 'hom' }}/terraform.tfstate"
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
+            -backend-config="key=infra-k8s/${AMBIENTE}/terraform.tfstate"
 
       - name: Apply
-        run: |
-          terraform apply -auto-approve -input=false \
-            -var="ambiente=${{ github.ref_name == 'main' && 'prod' || 'hom' }}"
+        run: terraform apply -auto-approve -input=false -var="ambiente=${AMBIENTE}"
+
+      - name: Plataforma no cluster (namespace, RabbitMQ, usuários)
+        run: bash scripts/plataforma-k8s.sh "${AMBIENTE}"
 
       - name: Resumo
         if: always()
         run: |
           {
-            echo "## Infraestrutura Kubernetes — \`${{ github.ref_name == 'main' && 'prod' || 'hom' }}\`"
+            echo "## Plataforma — \`${AMBIENTE}\`"
             echo
             echo '```'
             terraform output 2>/dev/null || echo "(sem outputs — o apply falhou?)"
+            echo
+            kubectl -n oficina get statefulset,pods,svc 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

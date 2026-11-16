@@ -1,0 +1,70 @@
+# Cria (ou atualiza) um usuário por serviço no RabbitMQ, pela API de
+# management. Idempotente: PUT do mesmo usuário com a mesma senha não muda
+# nada, então o Job pode rodar a cada aplicação da plataforma
+# (scripts/plataforma-k8s.sh apaga o Job anterior e cria de novo).
+#
+# Cada serviço recebe permissão total no vhost "/" — identidades separadas
+# servem para auditar e revogar um serviço sem derrubar os outros. Restringir
+# por nome de exchange/fila é o passo seguinte, se o número de serviços crescer.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rabbitmq-usuarios
+  namespace: oficina
+  labels:
+    app.kubernetes.io/name: rabbitmq-usuarios
+    app.kubernetes.io/part-of: oficina
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rabbitmq-usuarios
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: usuarios
+          image: curlimages/curl:8.11.1
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              API="http://rabbitmq.oficina.svc.cluster.local:15672/api"
+              echo "Esperando a API de management do RabbitMQ..."
+              until curl -fsS -u "$ADMIN_USER:$ADMIN_PASS" "$API/overview" >/dev/null; do sleep 3; done
+              criar() {
+                usuario="$1"; senha="$2"
+                curl -fsS -u "$ADMIN_USER:$ADMIN_PASS" -H 'Content-Type: application/json' \
+                  -X PUT "$API/users/$usuario" -d "{\"password\":\"$senha\",\"tags\":\"\"}"
+                curl -fsS -u "$ADMIN_USER:$ADMIN_PASS" -H 'Content-Type: application/json' \
+                  -X PUT "$API/permissions/%2F/$usuario" -d '{"configure":".*","write":".*","read":".*"}'
+                echo "usuário $usuario pronto"
+              }
+              criar "$OS_USER" "$OS_PASS"
+              criar "$EXECUCAO_USER" "$EXECUCAO_PASS"
+              criar "$BILLING_USER" "$BILLING_PASS"
+          env:
+            - { name: ADMIN_USER, valueFrom: { secretKeyRef: { name: oficina-rabbitmq-admin, key: username } } }
+            - { name: ADMIN_PASS, valueFrom: { secretKeyRef: { name: oficina-rabbitmq-admin, key: password } } }
+            - { name: OS_USER, valueFrom: { secretKeyRef: { name: oficina-os-rabbitmq, key: username } } }
+            - { name: OS_PASS, valueFrom: { secretKeyRef: { name: oficina-os-rabbitmq, key: password } } }
+            - { name: EXECUCAO_USER, valueFrom: { secretKeyRef: { name: oficina-execucao-rabbitmq, key: username } } }
+            - { name: EXECUCAO_PASS, valueFrom: { secretKeyRef: { name: oficina-execucao-rabbitmq, key: password } } }
+            - { name: BILLING_USER, valueFrom: { secretKeyRef: { name: oficina-billing-rabbitmq, key: username } } }
+            - { name: BILLING_PASS, valueFrom: { secretKeyRef: { name: oficina-billing-rabbitmq, key: password } } }
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

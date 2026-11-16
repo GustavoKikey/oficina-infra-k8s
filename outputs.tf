@@ -27,3 +27,8 @@ output "kubeconfig" {
   description = "Comando para apontar o kubectl para este cluster."
   value       = "aws eks update-kubeconfig --region ${var.regiao} --name ${aws_eks_cluster.este.name}"
 }
+
+output "rabbitmq_secret_arn" {
+  description = "ARN do secret com as credenciais do RabbitMQ (admin e um usuário por serviço)."
+  value       = aws_secretsmanager_secret.rabbitmq.arn
+}

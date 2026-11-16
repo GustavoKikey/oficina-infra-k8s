@@ -1,115 +1,92 @@
 # oficina-infra-k8s
 
-Infraestrutura de **rede e cluster Kubernetes** da oficina — repositório 2 dos 4 do
-Tech Challenge Fase 3 (15SOAT).
-
-## Propósito
-
-**Primeiro da cadeia.** Cria os security groups sobre a VPC default e o cluster EKS, e
-publica no SSM Parameter Store o que os outros três repositórios precisam para se
-conectar.
+**Plataforma** da oficina na AWS: rede, cluster Kubernetes (EKS) e o **RabbitMQ** que os
+microsserviços usam — e os **scripts de operação** do ambiente inteiro. Nasceu na fase 3
+(repositório 2 dos 4); na fase 4 passou a servir os três microsserviços.
 
 ```
-[2] infra-k8s  ->  [3] infra-database  ->  [1] lambda-auth  ->  [4] oficina-app
+[oficina-infra-k8s]  ->  infra/ de cada serviço  ->  deploy (cd.yml)  ->  oficina-auth-lambda
+  rede, EKS, RabbitMQ     bancos e tabela             OS, Execução,        login do cliente
+                                                      Billing
 ```
 
-## Tecnologias
-
-Terraform ~> 1.9 · AWS provider ~> 5.70 · Amazon EKS · GitHub Actions
+Arquitetura do sistema e decisões de implantação:
+[oficina-os-service/docs/fase-4](https://github.com/GustavoKikey/oficina-os-service/tree/main/docs/fase-4)
+(em especial o [ADR 012](https://github.com/GustavoKikey/oficina-os-service/blob/main/docs/fase-4/adr/adr-012-implantacao-na-aws.md)).
 
 ## O que provisiona
 
 | Recurso | Observação |
 | --- | --- |
-| Security group do cluster | Saída liberada (pull de imagem, OTLP) |
-| Security group da Lambda | **Sem saída para a internet** — só 5432 para o banco |
-| Security group do banco | Só aceita 5432 do cluster e da Lambda; sem saída |
-| Cluster EKS | Endpoint público e privado; logs de `api` e `audit` no CloudWatch |
-| Node group | `t3.medium`, 2 nós, teto de 4 (o HPA escala pods, mas precisa de nó livre) |
-| Addon metrics-server | Pré-requisito do HPA — sem ele o HPA fica em `unknown` |
-| 6 parâmetros no SSM | O contrato com os outros repos |
+| Security group do cluster | Saída liberada (pull de imagem, OTLP, Mercado Pago, DynamoDB) |
+| Security group dos bancos | Só aceita 5432 dos nós do cluster; sem saída. Usado pelos dois RDS (OS e Execução) |
+| Security group da Lambda | **Sem internet**: só a porta 80 dentro da VPC, para o LB interno do OS Service |
+| Cluster EKS + node group | `t3.medium`, **3 nós** (teto de 5 para o HPA); logs de `api` e `audit` no CloudWatch |
+| Addon metrics-server | Pré-requisito do HPA |
+| Credenciais do RabbitMQ | Admin + **um usuário por serviço**, geradas pelo Terraform, no Secrets Manager |
+| RabbitMQ no cluster ([`k8s/rabbitmq/`](k8s/rabbitmq/)) | StatefulSet de uma réplica, filas quorum, métricas Prometheus por fila, Job que cria os usuários |
 
-**A VPC não é criada** — a default é reaproveitada. Subnets privadas exigiriam NAT
-Gateway ou VPC endpoints, ambos cobrados por hora, e o isolamento que importa aqui vem
-dos security groups: o banco só aceita conexão dos grupos do cluster e da Function.
-Trade-off registrado em [ADR 004](https://github.com/GustavoKikey/tech-challenge-15SOAT/blob/main/docs/fase-3/adr/adr-004-padrao-de-comunicacao.md), §3.
+**A VPC não é criada** — a default é reaproveitada: subnets privadas exigiriam NAT Gateway ou
+VPC endpoints, cobrados por hora, e o isolamento vem dos security groups.
 
-## Contrato publicado no SSM
+## Contrato publicado no SSM (`/oficina/{env}/...`)
 
 | Parâmetro | Consumido por |
 | --- | --- |
-| `/oficina/{env}/rede/vpc-id` | repos 1, 3 |
-| `/oficina/{env}/rede/subnet-ids` | repos 1, 3 |
-| `/oficina/{env}/rede/sg-lambda-id` | repo 1 |
-| `/oficina/{env}/rede/sg-banco-id` | repo 3 |
-| `/oficina/{env}/eks/cluster-name` | repo 4 |
-| `/oficina/{env}/eks/endpoint` | repo 4 |
+| `rede/vpc-id`, `rede/vpc-cidr`, `rede/subnet-ids` | Lambda, bancos dos serviços |
+| `rede/sg-banco-id` | `infra/` do OS e da Execução |
+| `rede/sg-lambda-id` | Lambda |
+| `eks/cluster-name`, `eks/endpoint` | `cd.yml` dos serviços, scripts |
+| `mensageria/secret-arn`, `mensageria/host` | `scripts/plataforma-k8s.sh` |
 
-## Passo zero — backend do Terraform
+## Operação do ambiente
 
-O bucket S3 e a tabela DynamoDB que guardam e travam o state precisam existir antes do
-primeiro `terraform init`. São criados uma única vez, com AWS CLI:
+Sequência de uma sessão do Learner Lab:
 
-```bash
-bash scripts/fase-3/01-bootstrap.sh SEU-SUFIXO-UNICO   # no repositório da aplicação
+```
+liga o lab -> diagnostico -> (bootstrap, 1x) -> renovar-secrets -> aplicar -> usa -> destruir
 ```
 
-Feito com CLI em vez de Terraform de propósito: é este passo que cria o backend onde o
-state dos outros módulos vai morar, então gerenciá-lo por Terraform exigiria um state
-local que ninguém compartilha.
+| Script | Quando | O que faz |
+| --- | --- | --- |
+| [`diagnostico-lab.sh`](scripts/diagnostico-lab.sh) | Sempre primeiro | Confere credenciais, roles do lab, serviços e o que já está ligado. Somente leitura |
+| [`bootstrap.sh SUFIXO`](scripts/bootstrap.sh) | Uma vez por conta | Bucket S3 e tabela DynamoDB do state do Terraform (já existem desde a fase 3) |
+| [`renovar-secrets.sh USUARIO`](scripts/renovar-secrets.sh) | A cada sessão | Reenvia as credenciais de 4h aos 5 repositórios (e, se exportados, `NEW_RELIC_LICENSE_KEY` e `MP_ACCESS_TOKEN`) |
+| [`aplicar.sh hom`](scripts/aplicar.sh) | Para subir tudo | Plataforma → bancos dos serviços → **CD dos três serviços** (OS primeiro) → Lambda, e imprime os endereços |
+| [`liberar-meu-ip.sh`](scripts/liberar-meu-ip.sh) | Ao usar / trocar de rede | Abre os 3 load balancers públicos para o seu IP (`--fechar` tranca) |
+| [`observabilidade.sh hom`](scripts/observabilidade.sh) | Depois de aplicar | Agente do New Relic no cluster (métricas, logs, eventos) |
+| [`newrelic-saga.py hom`](scripts/newrelic-saga.py) | Uma vez por conta New Relic | Painel "Oficina — Saga (fase 4)" e os alertas da saga |
+| [`plataforma-k8s.sh hom`](scripts/plataforma-k8s.sh) | Chamado pelo `aplicar.sh` e pelo workflow | Namespace, Secrets do RabbitMQ, o broker e os usuários |
+| [`destruir.sh hom`](scripts/destruir.sh) | **Antes de fechar o lab** | Ordem inversa; apaga antes os load balancers do Kubernetes, que senão travariam a rede |
 
-## Execução
+Os scripts esperam os repositórios clonados lado a lado:
 
-```bash
-terraform init \
-  -backend-config="bucket=oficina-tfstate-SEU-SUFIXO" \
-  -backend-config="dynamodb_table=oficina-tflock-SEU-SUFIXO"
-
-terraform plan  -var="ambiente=hom"
-terraform apply -var="ambiente=hom"
+```
+pasta/
+├── oficina-infra-k8s/        ← este
+├── oficina-os-service/
+├── oficina-execucao-service/
+├── oficina-billing-service/
+└── oficina-auth-lambda/
 ```
 
-Depois, para usar o cluster:
-
-```bash
-aws eks update-kubeconfig --region us-east-1 --name oficina-hom
-```
+**Custo:** ~US$ 0,36 por hora de ambiente ligado (EKS, 3 nós, 2 RDS, 4 load balancers) —
+cerca de US$ 1,50 por sessão de 4 horas. Por isso o `destruir.sh` ao fim de cada sessão:
+esquecido ligado, o ambiente consome ~US$ 9 por dia.
 
 ## CI/CD
 
-`.github/workflows/terraform.yml`
+[`terraform.yml`](.github/workflows/terraform.yml):
 
-| Gatilho | O que faz |
+| Gatilho | O que roda |
 | --- | --- |
-| Pull Request | `fmt`, `validate`, `tflint` e **`plan` comentado no PR** |
-| push em `homolog` | `apply` no ambiente `hom` |
-| push em `main` | `apply` no ambiente `prod` |
+| PR e push na `main` | fmt, validate, tflint, kubeconform (`k8s/`), sintaxe dos scripts |
+| PR | `terraform plan` comentado no PR — pulado com aviso se a sessão do lab estiver fechada |
+| *Run workflow* | `terraform apply` + plataforma no cluster, no ambiente escolhido |
 
-Secrets necessários: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-`TF_STATE_BUCKET`, `TF_LOCK_TABLE`.
+Fase 4: o apply deixou de ser automático no merge. A infraestrutura sobe quando alguém vai
+usá-la; o que é contínuo é o deploy dos serviços.
 
-> As credenciais do AWS Academy são **temporárias** (sessão de 4h). O
-> `AWS_SESSION_TOKEN` precisa ser renovado nos secrets a cada sessão. Numa conta
-> própria, trocar por OIDC e remover as três chaves.
+## Tecnologias
 
-## IAM em ambientes com criação de role restrita
-
-Em ambientes onde criar IAM roles não é permitido — contas gerenciadas, laboratórios
-acadêmicos — o Terraform descobre as roles já provisionadas por padrão de nome, já que
-elas carregam sufixo aleatório por conta:
-
-| Role | Uso |
-| --- | --- |
-| `...LabEksClusterRole-...` | control plane |
-| `...LabEksNodeRole-...` | nós — traz a `AmazonEKS_CNI_Policy` |
-
-A `AmazonEKS_CNI_Policy` é o detalhe que importa: sem ela o VPC CNI não atribui IP aos
-pods e os nós ficam `NotReady`, com um erro que não menciona IAM em lugar nenhum. Roles
-genéricas costumam não tê-la, por isso a role dedicada tem prioridade na descoberta.
-
-Numa conta AWS comum, informe as roles em `role_arn_cluster` e `role_arn_nos`.
-
-## Diagrama
-
-Ver [diagrama de componentes](https://github.com/GustavoKikey/tech-challenge-15SOAT/blob/main/docs/fase-3/diagrama-componentes.md) — este repositório provisiona a caixa
-**Amazon EKS** e os security groups dentro de **VPC default**.
+Terraform ~> 1.9 · AWS provider ~> 5.70 · Amazon EKS · RabbitMQ 4.3 · GitHub Actions

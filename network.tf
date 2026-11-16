@@ -72,16 +72,16 @@ resource "aws_security_group" "lambda" {
   description = "Function de autenticacao por CPF"
   vpc_id      = data.aws_vpc.default.id
 
-  # Sem regra de egress para a internet de propósito: a função só precisa
-  # falar com o RDS. Endpoint, senha e chave privada chegam como variáveis
-  # de ambiente, injetadas no terraform apply — não são lidas do Secrets
-  # Manager em runtime (ADR 004, §3).
+  # Fase 4 (ADR 011 do OS Service): a função não toca mais em banco nenhum —
+  # nenhum serviço acessa o banco de outro. Ela consulta o cliente no OS
+  # Service, pelo load balancer INTERNO dele (porta 80, dentro da VPC).
+  # Continua sem saída para a internet: o destino é o CIDR da própria VPC.
   egress {
-    description     = "Somente PostgreSQL, e somente para o SG do banco"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.banco.id]
+    description = "HTTP para o load balancer interno do OS Service (dentro da VPC)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
   tags = local.tags
@@ -89,14 +89,18 @@ resource "aws_security_group" "lambda" {
 
 resource "aws_security_group" "banco" {
   name        = "${var.projeto}-${var.ambiente}-banco"
-  description = "RDS PostgreSQL - aceita apenas cluster e lambda"
+  description = "RDS PostgreSQL - aceita apenas o cluster"
   vpc_id      = data.aws_vpc.default.id
 
   tags = local.tags
 }
 
-# Regras separadas do bloco do SG para evitar dependência circular:
-# lambda -> banco e banco <- lambda se referenciam mutuamente.
+# Regras separadas do bloco do SG: o SG gerado pelo EKS só existe depois do
+# cluster, e o banco precisa referenciá-lo.
+#
+# Os dois bancos da fase 4 (OS e Execução) usam este mesmo SG: quem fala com
+# eles são os pods, e cada serviço só conhece a URL e a senha do próprio
+# banco (ver infra/ de cada serviço).
 
 resource "aws_vpc_security_group_ingress_rule" "banco_do_cluster" {
   security_group_id            = aws_security_group.banco.id
@@ -122,15 +126,6 @@ resource "aws_vpc_security_group_ingress_rule" "banco_do_cluster_eks" {
   security_group_id            = aws_security_group.banco.id
   description                  = "PostgreSQL a partir dos nos (cluster SG gerado pelo EKS)"
   referenced_security_group_id = aws_eks_cluster.este.vpc_config[0].cluster_security_group_id
-  from_port                    = 5432
-  to_port                      = 5432
-  ip_protocol                  = "tcp"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "banco_da_lambda" {
-  security_group_id            = aws_security_group.banco.id
-  description                  = "PostgreSQL a partir da funcao de autenticacao"
-  referenced_security_group_id = aws_security_group.lambda.id
   from_port                    = 5432
   to_port                      = 5432
   ip_protocol                  = "tcp"

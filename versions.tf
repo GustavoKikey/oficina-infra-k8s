@@ -15,6 +15,11 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.70"
     }
+    # Senhas do RabbitMQ (mensageria.tf), geradas e nunca digitadas.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   # State remoto: sem isso o state nasce e morre dentro do runner do
